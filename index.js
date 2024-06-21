@@ -25,8 +25,10 @@ app.use('/uploads', express.static(__dirname + '/uploads'));
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
-  origin: 'https://chatcorrectedfront.vercel.app/', 
-  credentials: true
+  origin: 'http://localhost:5173',
+  credentials: true,
+  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
 // Helper function to get user data from request
@@ -129,7 +131,7 @@ const server = app.listen(4040, () => {
 });
 
 // WebSocket setup
-const wss = new ws.Server({ server });
+const wss = new ws.Server({ server, maxPayload: 50 * 1024 * 1024 }); // 50MB payload limit
 wss.on('connection', (connection, req) => {
 
   function notifyAboutOnlinePeople() {
@@ -174,36 +176,45 @@ wss.on('connection', (connection, req) => {
   }
 
   connection.on('message', async (message) => {
-    const messageData = JSON.parse(message.toString());
-    const { recipient, text, file } = messageData;
-    let filename = null;
-    if (file) {
-      const parts = file.name.split('.');
-      const ext = parts[parts.length - 1];
-      filename = Date.now() + '.' + ext;
-      const path = __dirname + '/uploads/' + filename;
-      const bufferData = Buffer.from(file.data.split(',')[1], 'base64');
-      fs.writeFile(path, bufferData, () => {
-        console.log('file saved:' + path);
-      });
-    }
-    if (recipient && (text || file)) {
-      const messageDoc = await Message.create({
-        sender: connection.userId,
-        recipient,
-        text,
-        file: file ? filename : null,
-      });
-      [...wss.clients]
-        .filter(c => c.userId === recipient)
-        .forEach(c => c.send(JSON.stringify({
-          text,
+    try {
+      const messageData = JSON.parse(message.toString());
+      const { recipient, text, file } = messageData;
+      let filename = null;
+      if (file) {
+        const parts = file.name.split('.');
+        const ext = parts[parts.length - 1];
+        filename = Date.now() + '.' + ext;
+        const path = __dirname + '/uploads/' + filename;
+        const bufferData = Buffer.from(file.data.split(',')[1], 'base64');
+        fs.writeFile(path, bufferData, () => {
+          console.log('file saved:' + path);
+        });
+      }
+      if (recipient && (text || file)) {
+        const messageDoc = await Message.create({
           sender: connection.userId,
           recipient,
+          text,
           file: file ? filename : null,
-          _id: messageDoc._id,
-        })));
+        });
+        [...wss.clients]
+          .filter(c => c.userId === recipient)
+          .forEach(c => c.send(JSON.stringify({
+            text,
+            sender: connection.userId,
+            recipient,
+            file: file ? filename : null,
+            _id: messageDoc._id,
+          })));
+      }
+    } catch (error) {
+      console.error('Failed to process message:', error);
+      connection.send(JSON.stringify({ error: 'Failed to process message' }));
     }
+  });
+
+  connection.on('error', (error) => {
+    console.error('WebSocket error:', error);
   });
 
   notifyAboutOnlinePeople();
